@@ -30,6 +30,19 @@ export default function HowItWorks() {
           Each draw publishes a seed hash up front and reveals the seed after
           payout, so every winner can be verified on-chain.
         </li>
+        <li>
+
+          Fully open source: read the engine and replay any draw at{" "}
+
+          <a href="https://github.com/HoodballGH/hoodball" target="_blank" rel="noopener noreferrer">
+
+            github.com/HoodballGH/hoodball
+
+          </a>
+
+          .
+
+        </li>
       </ol>
     </Card>
   );
