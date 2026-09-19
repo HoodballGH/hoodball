@@ -1,6 +1,6 @@
 {
   "drawsEnabled": true,
-  "drawIntervalSeconds": 3600,
+  "drawIntervalSeconds": 300,
   "winnersPerDraw": 1,
   "minBalance": "0",
   "excludedAddresses": [],

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { PoolClient } from "pg";
 import { formatEther, formatUnits, keccak256, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { estimateTransferGas, isUnderpricedRejection, suggestedGasPrice } from "./gas";
 import { CHAIN_ID, CONFIRMATIONS, EXPLORER_URL } from "./chain";
 import { readConfig } from "./db";
 import { selectWinners, splitPot } from "./draw-selection";
@@ -616,10 +617,52 @@ export async function createDraw(
   return "paid";
 }
 
+type Reprice = {
+  account: ReturnType<typeof privateKeyToAccount>;
+  recipient: string;
+  amount: bigint;
+  nonce: bigint;
+};
+
+// Re-signs the identical transfer (same nonce, recipient and amount) with a
+// higher gas price when the network refused the original as underpriced and
+// never saw it. The nonce guarantees at most one of the two can ever mine.
+async function reprice(
+  client: PoolClient,
+  payout: { id: string; tx_hash: Hex },
+  r: Reprice,
+) {
+  const latest = BigInt(
+    await rpc<Hex>("eth_getTransactionCount", [r.account.address, "latest"]),
+  );
+  if (latest !== r.nonce) return null;
+  const gasPrice = await suggestedGasPrice(limits.maxGasPrice());
+  if (gasPrice > limits.maxGasPrice()) return null;
+  const gas = await estimateTransferGas(r.account.address, r.recipient, r.amount);
+  const raw = await r.account.signTransaction({
+    chainId: CHAIN_ID,
+    to: r.recipient as Hex,
+    value: r.amount,
+    gas,
+    gasPrice,
+    nonce: Number(r.nonce),
+    type: "legacy",
+  });
+  const hash = keccak256(raw);
+  const stored = await client.query(
+    "UPDATE hoodball.draw_payouts SET raw_tx=$2,tx_hash=$3,reason=$4,updated_at=now() WHERE id=$1 AND status='signed' AND tx_hash=$5",
+    [payout.id, raw, hash, `Repriced to ${gasPrice} wei gas after an underpriced rejection`, payout.tx_hash],
+  );
+  if (!stored.rowCount) return null;
+  return { raw_tx: raw, tx_hash: hash };
+}
+
 async function broadcast(
   client: PoolClient,
   payout: { id: string; raw_tx: Hex; tx_hash: Hex },
-) {
+  r?: Reprice,
+): Promise<boolean> {
+  let rejection: unknown;
   try {
     const hash = await rpc<Hex>("eth_sendRawTransaction", [payout.raw_tx]);
     if (!same(hash, payout.tx_hash)) throw new Error("Broadcast hash mismatch");
@@ -628,21 +671,29 @@ async function broadcast(
       [payout.id],
     );
     return true;
-  } catch {
-    const known = await rpc<{ hash: Hex } | null>("eth_getTransactionByHash", [
-      payout.tx_hash,
-    ]);
-    if (known) {
-      await client.query(
-        "UPDATE hoodball.draw_payouts SET status='submitted',updated_at=now() WHERE id=$1",
-        [payout.id],
-      );
-      return true;
-    }
-    drawStatus =
-      "A signed payout is awaiting network acceptance; its exact transaction is retained";
-    return false;
+  } catch (error) {
+    rejection = error;
   }
+  const known = await rpc<{ hash: Hex } | null>("eth_getTransactionByHash", [
+    payout.tx_hash,
+  ]);
+  if (known) {
+    await client.query(
+      "UPDATE hoodball.draw_payouts SET status='submitted',updated_at=now() WHERE id=$1",
+      [payout.id],
+    );
+    return true;
+  }
+  if (r && isUnderpricedRejection(rejection)) {
+    const next = await reprice(client, payout, r);
+    if (next) return broadcast(client, { id: payout.id, ...next });
+  }
+  console.error(
+    `Payout ${payout.id} broadcast rejected: ${rejection instanceof Error ? rejection.message : "unknown"}`,
+  );
+  drawStatus =
+    "A signed payout is awaiting network acceptance; its exact transaction is retained";
+  return false;
 }
 
 export async function runDraws(client: PoolClient) {
@@ -689,16 +740,11 @@ export async function runDraws(client: PoolClient) {
     return;
   }
   try {
-    if (
-      (
-        await client.query(
-          "SELECT 1 FROM hoodball.draw_payouts WHERE status='review' LIMIT 1",
-        )
-      ).rowCount
-    ) {
-      drawStatus = "A payout needs operator review; new draws are paused";
-      return;
-    }
+    const underReview = !!(
+      await client.query(
+        "SELECT 1 FROM hoodball.draw_payouts WHERE status='review' LIMIT 1",
+      )
+    ).rowCount;
     const pending = (
       await client.query<PayoutRow>(
         "SELECT * FROM hoodball.draw_payouts WHERE status IN ('signed','submitted') ORDER BY nonce LIMIT 100",
@@ -715,7 +761,25 @@ export async function runDraws(client: PoolClient) {
           ])
         )
           continue;
+        const known = await rpc<{ hash: Hex } | null>(
+          "eth_getTransactionByHash",
+          [payout.tx_hash],
+        );
         if (payout.nonce !== null && latestNonce > BigInt(payout.nonce)) {
+          if (!known) {
+            // The retained bytes can never mine (nonce used by another mined
+            // transaction) and the network never saw them: sign again fresh.
+            await client.query(
+              "UPDATE hoodball.draw_payouts SET status='queued',nonce=NULL,raw_tx=NULL,tx_hash=NULL,reason='Requeued: vault nonce was consumed externally before broadcast',updated_at=now() WHERE id=$1",
+              [payout.id],
+            );
+            await client.query(
+              "UPDATE hoodball.draws SET status='scheduled',updated_at=now() WHERE id=$1 AND status='review'",
+              [payout.draw_id],
+            );
+            console.error(`Payout ${payout.id} requeued: vault nonce consumed externally`);
+            continue;
+          }
           await client.query(
             "UPDATE hoodball.draw_payouts SET status='review',reason='Vault nonce consumed by another transaction',updated_at=now() WHERE id=$1",
             [payout.id],
@@ -723,17 +787,13 @@ export async function runDraws(client: PoolClient) {
           drawStatus = "A vault nonce conflict needs operator review";
           return;
         }
-        const known = await rpc<{ hash: Hex } | null>(
-          "eth_getTransactionByHash",
-          [payout.tx_hash],
-        );
         if (
           !known &&
-          !(await broadcast(client, {
-            id: payout.id,
-            raw_tx: payout.raw_tx!,
-            tx_hash: payout.tx_hash!,
-          }))
+          !(await broadcast(
+            client,
+            { id: payout.id, raw_tx: payout.raw_tx!, tx_hash: payout.tx_hash! },
+            { account, recipient: payout.recipient, amount: BigInt(payout.amount_wei), nonce: BigInt(payout.nonce!) },
+          ))
         )
           return;
         if (known && payout.status === "signed")
@@ -742,7 +802,18 @@ export async function runDraws(client: PoolClient) {
             [payout.id],
           );
       }
-      drawStatus = `Waiting for ${pending.length} payout${pending.length === 1 ? "" : "s"} to confirm`;
+      const stillPending = (
+        await client.query(
+          "SELECT count(*)::int AS n FROM hoodball.draw_payouts WHERE status IN ('signed','submitted')",
+        )
+      ).rows[0].n as number;
+      if (stillPending) {
+        drawStatus = `Waiting for ${stillPending} payout${stillPending === 1 ? "" : "s"} to confirm`;
+        return;
+      }
+    }
+    if (underReview) {
+      drawStatus = "A payout needs operator review; new draws are paused";
       return;
     }
     if (
@@ -756,9 +827,22 @@ export async function runDraws(client: PoolClient) {
         "Waiting for treasury transactions to confirm before the draw";
       return;
     }
-    const vaultEthWei = BigInt(
+    const committed = BigInt(
+      (
+        await client.query(
+          "SELECT coalesce(sum(amount_wei),0)::text AS total, count(*)::int AS n FROM hoodball.draw_payouts WHERE status IN ('queued','signed','submitted')",
+        )
+      ).rows[0].total,
+    );
+    const committedCount = (
+      await client.query(
+        "SELECT count(*)::int AS n FROM hoodball.draw_payouts WHERE status='queued'",
+      )
+    ).rows[0].n as number;
+    const rawVaultEthWei = BigInt(
       await rpc<Hex>("eth_getBalance", [account.address, "latest"]),
     );
+    const vaultEthWei = rawVaultEthWei > committed ? rawVaultEthWei - committed : 0n;
     const last = (
       await client.query(
         "SELECT cycle_id FROM hoodball.draws ORDER BY cycle_id DESC LIMIT 1",
@@ -769,7 +853,7 @@ export async function runDraws(client: PoolClient) {
       config.drawIntervalSeconds,
       last ? Number(last.cycle_id) : null,
     );
-    if (due !== null)
+    if (due !== null && committedCount === 0)
       await createDraw(
         client,
         config,
@@ -797,15 +881,16 @@ export async function runDraws(client: PoolClient) {
       drawStatus = "Waiting for other vault transactions to confirm";
       return;
     }
-    const gasPrice = BigInt(await rpc<Hex>("eth_gasPrice"));
+    const gasPrice = await suggestedGasPrice(limits.maxGasPrice());
     if (gasPrice > limits.maxGasPrice()) {
       drawStatus = "Network fee exceeds the configured limit";
       return;
     }
-    let balance = vaultEthWei;
+    let balance = rawVaultEthWei;
     for (const payout of queued) {
       const amount = BigInt(payout.amount_wei);
-      const cost = amount + PAYOUT_GAS * gasPrice;
+      const gas = await estimateTransferGas(account.address, payout.recipient, amount);
+      const cost = amount + gas * gasPrice;
       if (balance - cost < limits.ethFloor()) {
         drawStatus = "Vault needs ETH to cover the payout and its fee";
         return;
@@ -816,7 +901,7 @@ export async function runDraws(client: PoolClient) {
         chainId: CHAIN_ID,
         to: payout.recipient as Hex,
         value: amount,
-        gas: PAYOUT_GAS,
+        gas,
         gasPrice,
         nonce: Number(nonce),
         type: "legacy",
@@ -828,11 +913,11 @@ export async function runDraws(client: PoolClient) {
       );
       if (!stored.rowCount) return;
       if (
-        !(await broadcast(client, {
-          id: payout.id,
-          raw_tx: raw,
-          tx_hash: hash,
-        }))
+        !(await broadcast(
+          client,
+          { id: payout.id, raw_tx: raw, tx_hash: hash },
+          { account, recipient: payout.recipient, amount, nonce },
+        ))
       )
         return;
       balance -= cost;

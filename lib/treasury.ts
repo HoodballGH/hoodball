@@ -1,3 +1,4 @@
+import { parseTransaction } from "viem";
 import { randomBytes } from "node:crypto";
 import type { PoolClient } from "pg";
 import {
@@ -11,6 +12,7 @@ import {
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { isUnderpricedRejection, suggestedGasPrice } from "./gas";
 import { CHAIN_ID, CONFIRMATIONS, EXPLORER_URL } from "./chain";
 import { readConfig } from "./db";
 import { assertChain, blockTag, rpc, rpcNumber } from "./rpc";
@@ -497,10 +499,49 @@ async function readState(
   return state;
 }
 
+type OpReprice = {
+  account: ReturnType<typeof privateKeyToAccount>;
+  nonce: bigint;
+};
+
+async function repriceOp(
+  client: PoolClient,
+  op: { id: string; raw_tx: Hex; tx_hash: Hex },
+  r: OpReprice,
+) {
+  const latest = BigInt(
+    await rpc<Hex>("eth_getTransactionCount", [r.account.address, "latest"]),
+  );
+  if (latest !== r.nonce) return null;
+  const gasPrice = await suggestedGasPrice(limits.maxGasPrice());
+  if (gasPrice > limits.maxGasPrice()) return null;
+  const parsed = parseTransaction(op.raw_tx);
+  if (parsed.to === undefined || parsed.gas === undefined) return null;
+  const raw = await r.account.signTransaction({
+    chainId: CHAIN_ID,
+    to: parsed.to,
+    data: parsed.data,
+    value: parsed.value ?? 0n,
+    gas: parsed.gas,
+    gasPrice,
+    nonce: Number(r.nonce),
+    type: "legacy",
+  });
+  const hash = keccak256(raw);
+  const stored = await client.query(
+    "UPDATE hoodball.treasury_ops SET raw_tx=$2,tx_hash=$3,updated_at=now() WHERE id=$1 AND status='signed' AND tx_hash=$4",
+    [op.id, raw, hash, op.tx_hash],
+  );
+  if (!stored.rowCount) return null;
+  return { raw_tx: raw, tx_hash: hash };
+}
+
 async function broadcast(
   client: PoolClient,
   op: { id: string; raw_tx: Hex; tx_hash: Hex },
-) {
+  r?: OpReprice,
+): Promise<boolean> {
+  let rejection: unknown;
   try {
     const hash = await rpc<Hex>("eth_sendRawTransaction", [op.raw_tx]);
     if (!same(hash, op.tx_hash)) throw new Error("Broadcast hash mismatch");
@@ -509,21 +550,29 @@ async function broadcast(
       [op.id],
     );
     return true;
-  } catch {
-    const known = await rpc<{ hash: Hex } | null>("eth_getTransactionByHash", [
-      op.tx_hash,
-    ]);
-    if (known) {
-      await client.query(
-        "UPDATE hoodball.treasury_ops SET status='submitted',updated_at=now() WHERE id=$1",
-        [op.id],
-      );
-      return true;
-    }
-    status =
-      "A signed treasury transaction is awaiting network acceptance; its exact bytes are retained";
-    return false;
+  } catch (error) {
+    rejection = error;
   }
+  const known = await rpc<{ hash: Hex } | null>("eth_getTransactionByHash", [
+    op.tx_hash,
+  ]);
+  if (known) {
+    await client.query(
+      "UPDATE hoodball.treasury_ops SET status='submitted',updated_at=now() WHERE id=$1",
+      [op.id],
+    );
+    return true;
+  }
+  if (r && isUnderpricedRejection(rejection)) {
+    const next = await repriceOp(client, op, r);
+    if (next) return broadcast(client, { id: op.id, ...next });
+  }
+  console.error(
+    `Treasury op ${op.id} broadcast rejected: ${rejection instanceof Error ? rejection.message : "unknown"}`,
+  );
+  status =
+    "A signed treasury transaction is awaiting network acceptance; its exact bytes are retained";
+  return false;
 }
 
 type Intent = {
@@ -581,7 +630,7 @@ async function execute(
       intent.reason,
     ],
   );
-  await broadcast(client, { id, raw_tx: raw, tx_hash: hash });
+  await broadcast(client, { id, raw_tx: raw, tx_hash: hash }, { account, nonce });
   status = `${intent.kind === "sweep" ? "Curve fee sweep" : intent.kind === "claim" ? "Escrow fee claim" : "WETH unwrap"} is being confirmed on chain`;
   return true;
 }
@@ -684,7 +733,18 @@ export async function runTreasury(client: PoolClient) {
           await rpc<Receipt | null>("eth_getTransactionReceipt", [op.tx_hash])
         )
           continue;
+        const known = await rpc<{ hash: Hex } | null>(
+          "eth_getTransactionByHash",
+          [op.tx_hash],
+        );
         if (op.nonce !== null && latestNonce > BigInt(op.nonce)) {
+          if (!known) {
+            await client.query(
+              "UPDATE hoodball.treasury_ops SET status='failed',reason='Dropped: vault nonce was consumed externally before broadcast; the keeper will plan it again',updated_at=now() WHERE id=$1",
+              [op.id],
+            );
+            continue;
+          }
           await client.query(
             "UPDATE hoodball.treasury_ops SET status='review',reason='Vault nonce consumed by another transaction',updated_at=now() WHERE id=$1",
             [op.id],
@@ -692,17 +752,13 @@ export async function runTreasury(client: PoolClient) {
           status = "A vault nonce conflict needs operator review";
           return;
         }
-        const known = await rpc<{ hash: Hex } | null>(
-          "eth_getTransactionByHash",
-          [op.tx_hash],
-        );
         if (
           !known &&
-          !(await broadcast(client, {
-            id: op.id,
-            raw_tx: op.raw_tx!,
-            tx_hash: op.tx_hash!,
-          }))
+          !(await broadcast(
+            client,
+            { id: op.id, raw_tx: op.raw_tx!, tx_hash: op.tx_hash! },
+            { account, nonce: BigInt(op.nonce!) },
+          ))
         )
           return;
         if (known && op.status === "signed")
@@ -760,7 +816,7 @@ export async function runTreasury(client: PoolClient) {
       status = "Waiting for other vault transactions to confirm";
       return;
     }
-    const gasPrice = BigInt(await rpc<Hex>("eth_gasPrice"));
+    const gasPrice = await suggestedGasPrice(limits.maxGasPrice());
     if (gasPrice > limits.maxGasPrice()) {
       status = "Network fee exceeds the configured limit";
       return;

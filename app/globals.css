@@ -905,3 +905,12 @@ table.data th.num {
     height: 3rem;
   }
 }
+
+.lime-text {
+  color: var(--lime);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+svg.eth {
+  opacity: 0.9;
+}

@@ -1,5 +1,6 @@
 "use client";
 
+import Eth from "@/components/ui/Eth";
 import { useLive } from "@/components/live/LiveProvider";
 import { Card, Pill, Stat } from "@/components/ui/primitives";
 import { eth, num, usd } from "@/components/ui/format";
@@ -23,7 +24,7 @@ export default function JackpotCard() {
       </div>
 
       <p className="jackpot-amount lime" style={{ margin: 0 }}>
-        {eth(jackpot.potEth)} ETH
+        {eth(jackpot.potEth)}<Eth />
       </p>
       <p className="t-sm muted" style={{ margin: "0.25rem 0 1.25rem" }}>
         {jackpot.potUsd !== null ? `${usd(jackpot.potUsd)} · ` : ""}paid to one
@@ -34,12 +35,12 @@ export default function JackpotCard() {
         <Stat label="Eligible holders" value={num(stats.eligibleHolders)} />
         <Stat
           label="Total paid out"
-          value={`${eth(draws.totalPaidEth)} ETH`}
+          value={<>{eth(draws.totalPaidEth)}<Eth /></>}
           sub={draws.totalPaidUsd !== null ? usd(draws.totalPaidUsd) : undefined}
         />
         <Stat
           label="Fees claimed to date"
-          value={`${eth(treasury.totals.claimedEth)} ETH`}
+          value={<>{eth(treasury.totals.claimedEth)}<Eth /></>}
           sub={`${num(draws.totalDraws)} draws so far`}
         />
       </div>
@@ -58,7 +59,7 @@ export default function JackpotCard() {
           <span className="t-xs dim">Vault not configured yet</span>
         )}
         <span className="t-xs dim">
-          Gas reserve {eth(treasury.gasReserveEth)} ETH stays in the vault
+          Gas reserve {eth(treasury.gasReserveEth)}<Eth /> stays in the vault
         </span>
       </div>
     </Card>

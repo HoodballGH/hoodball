@@ -1,5 +1,7 @@
 "use client";
 
+import Eth from "@/components/ui/Eth";
+
 import type { DrawRecord } from "@/lib/types";
 import Shell from "@/components/home/Shell";
 import { usePaged } from "@/components/home/usePaged";
@@ -63,7 +65,7 @@ function DrawCard({ draw }: { draw: DrawRecord }) {
       <div className="kv">
         <span className="k">Pot</span>
         <span className="v">
-          {eth(draw.potEth)} ETH{" "}
+          {eth(draw.potEth)}<Eth />{" "}
           {draw.potUsd !== null ? (
             <span className="muted">({usd(draw.potUsd)})</span>
           ) : null}
@@ -105,7 +107,7 @@ function DrawCard({ draw }: { draw: DrawRecord }) {
                 </p>
               </div>
               <div className="right">
-                <p className="amount">{eth(payout.amountEth)} ETH</p>
+                <p className="amount">{eth(payout.amountEth)}<Eth /></p>
                 {payout.explorerUrl ? (
                   <a
                     className="link sm"

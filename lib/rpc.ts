@@ -72,7 +72,8 @@ const BATCH_SIZE = Math.max(1, Number(process.env.HOODBALL_RPC_BATCH_SIZE ?? 25)
 let batchUnsupported = process.env.HOODBALL_RPC_BATCH === "false";
 class BatchUnsupportedError extends Error {}
 function rpcError(method: string, error: { code?: number; message?: string }) {
-  return new Error(`Robinhood RPC rejected ${method} (${error.code ?? "unknown"}${/rate|limit|too many/i.test(error.message ?? "") ? " rate limit" : ""})`);
+  const detail = (error.message ?? "").replace(/\s+/g, " ").slice(0, 200);
+  return new Error(`Robinhood RPC rejected ${method} (${error.code ?? "unknown"}${/rate|limit|too many/i.test(error.message ?? "") ? " rate limit" : ""})${detail ? `: ${detail}` : ""}`);
 }
 async function batchOnce<T>(slice: BatchRequest[]): Promise<T[]> {
   const ids = slice.map(() => ++nextId);

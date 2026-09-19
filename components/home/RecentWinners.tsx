@@ -2,12 +2,13 @@
 
 import { useState } from "react";
 import type { DrawRecord } from "@/lib/types";
+import Eth from "@/components/ui/Eth";
 import { useLive } from "@/components/live/LiveProvider";
 import { Card, RefreshIcon } from "@/components/ui/primitives";
 import { dateTime, eth, short, usd } from "@/components/ui/format";
 
 function PayoutRow({ draw }: { draw: DrawRecord }) {
-  if (draw.status !== "paid" || draw.payouts.length === 0) {
+  if (draw.payouts.length === 0) {
     return (
       <Card round hoverable>
         <div className="winner">
@@ -18,7 +19,7 @@ function PayoutRow({ draw }: { draw: DrawRecord }) {
             </p>
           </div>
           <div className="right">
-            <p className="amount muted">{eth(draw.potEth)} ETH</p>
+            <p className="amount muted">{eth(draw.potEth)}<Eth /></p>
           </div>
         </div>
       </Card>
@@ -38,13 +39,13 @@ function PayoutRow({ draw }: { draw: DrawRecord }) {
               </p>
             </div>
             <div className="right">
-              <p className="amount">{eth(payout.amountEth)} ETH</p>
+              <p className="amount">{eth(payout.amountEth)}<Eth /></p>
               {payout.amountUsd !== null ? (
                 <p className="t-xs muted" style={{ margin: "0.1rem 0 0" }}>
                   {usd(payout.amountUsd)}
                 </p>
               ) : null}
-              {payout.explorerUrl ? (
+              {payout.explorerUrl && payout.status === "confirmed" ? (
                 <a
                   className="link sm"
                   href={payout.explorerUrl}
@@ -54,7 +55,9 @@ function PayoutRow({ draw }: { draw: DrawRecord }) {
                   View on Blockscout →
                 </a>
               ) : (
-                <span className="t-xs dim">{payout.status}</span>
+                <span className="t-xs lime-text">
+                  {payout.status === "confirmed" ? "Paid" : "Payout confirming…"}
+                </span>
               )}
             </div>
           </div>
@@ -68,7 +71,7 @@ export default function RecentWinners() {
   const { snapshot, refresh } = useLive();
   const [refreshing, setRefreshing] = useState(false);
   const draws = (snapshot?.recentDraws ?? []).filter(
-    (draw) => draw.status === "paid" || draw.status === "rolled_over",
+    (draw) => draw.status !== "skipped",
   );
   const vaultUrl = snapshot?.vault.explorerUrl ?? null;
 
