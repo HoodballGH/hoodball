@@ -1,0 +1,8 @@
+{
+  "drawsEnabled": true,
+  "drawIntervalSeconds": 3600,
+  "winnersPerDraw": 1,
+  "minBalance": "0",
+  "excludedAddresses": [],
+  "twitterUrl": "https://x.com/PlayHoodball"
+}

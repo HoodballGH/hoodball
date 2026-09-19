@@ -1,0 +1,43 @@
+{
+  "name": "hoodball",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hoodball: an automated, balance-weighted ETH lottery for a Pons V2 token on Robinhood Chain.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "next build --webpack",
+    "start": "NODE_ENV=production tsx server.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "tsx --test tests/*.test.ts",
+    "configure": "tsx scripts/configure.ts",
+    "set-contract": "tsx scripts/set-contract.ts",
+    "test:integration": "tsx --test tests/integration.test.ts",
+    "seed:fixture": "tsx scripts/seed-fixture.ts",
+    "go-live": "tsx scripts/go-live.ts"
+  },
+  "dependencies": {
+    "next": "16.2.9",
+    "pg": "^8.16.3",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-fast-marquee": "^1.6.5",
+    "react-icons": "^5.7.0",
+    "tsx": "^4.22.4",
+    "undici": "^8.10.2",
+    "viem": "^2.52.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "@types/pg": "^8.15.5",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.9",
+    "typescript": "^5.9.3"
+  }
+}

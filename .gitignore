@@ -1,0 +1,13 @@
+node_modules/
+.next/
+.env*
+*.pem
+*.key
+credentials.json
+*.tsbuildinfo
+branding-output/
+test-results/
+video-refs/
+video-output/
+artifacts/
+.playwright-mcp/
