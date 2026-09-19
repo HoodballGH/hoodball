@@ -13,6 +13,7 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { isUnderpricedRejection, suggestedGasPrice } from "./gas";
+import { dueCycle } from "./draws";
 import { CHAIN_ID, CONFIRMATIONS, EXPLORER_URL } from "./chain";
 import { readConfig } from "./db";
 import { assertChain, blockTag, rpc, rpcNumber } from "./rpc";
@@ -804,6 +805,26 @@ export async function runTreasury(client: PoolClient) {
     );
     if (choice.kind === "none") {
       status = choice.reason;
+      return;
+    }
+    // Draws have priority over fee claims: never start a new treasury
+    // transaction while a draw is due (or within 60 s of one) or a payout is
+    // queued, otherwise continuous claiming starves the draw indefinitely.
+    const lastDraw = (
+      await client.query(
+        "SELECT cycle_id FROM hoodball.draws ORDER BY cycle_id DESC LIMIT 1",
+      )
+    ).rows[0];
+    const soonMs = Date.now() + 60_000;
+    const drawDue =
+      dueCycle(soonMs, config.drawIntervalSeconds, lastDraw ? Number(lastDraw.cycle_id) : null) !== null;
+    const payoutsQueued = !!(
+      await client.query(
+        "SELECT 1 FROM hoodball.draw_payouts WHERE status IN ('queued','signed','submitted') LIMIT 1",
+      )
+    ).rowCount;
+    if (drawDue || payoutsQueued) {
+      status = "Holding fee claims until the draw pays out";
       return;
     }
     const latestNonce = BigInt(
